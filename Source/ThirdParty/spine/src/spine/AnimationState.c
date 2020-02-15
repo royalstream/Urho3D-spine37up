@@ -1,8 +1,8 @@
 /******************************************************************************
  * Spine Runtimes License Agreement
- * Last updated May 1, 2019. Replaces all prior versions.
+ * Last updated January 1, 2020. Replaces all prior versions.
  *
- * Copyright (c) 2013-2019, Esoteric Software LLC
+ * Copyright (c) 2013-2020, Esoteric Software LLC
  *
  * Integration of the Spine Runtimes into software or otherwise creating
  * derivative works of the Spine Runtimes is permitted under the terms and
@@ -15,16 +15,16 @@
  * Spine Editor license and redistribution of the Products in any form must
  * include this license and copyright notice.
  *
- * THIS SOFTWARE IS PROVIDED BY ESOTERIC SOFTWARE LLC "AS IS" AND ANY EXPRESS
- * OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
- * OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN
- * NO EVENT SHALL ESOTERIC SOFTWARE LLC BE LIABLE FOR ANY DIRECT, INDIRECT,
- * INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING,
- * BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES, BUSINESS
- * INTERRUPTION, OR LOSS OF USE, DATA, OR PROFITS) HOWEVER CAUSED AND ON ANY
- * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
- * NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE,
- * EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * THE SPINE RUNTIMES ARE PROVIDED BY ESOTERIC SOFTWARE LLC "AS IS" AND ANY
+ * EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+ * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ * DISCLAIMED. IN NO EVENT SHALL ESOTERIC SOFTWARE LLC BE LIABLE FOR ANY
+ * DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+ * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES,
+ * BUSINESS INTERRUPTION, OR LOSS OF USE, DATA, OR PROFITS) HOWEVER CAUSED AND
+ * ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
+ * THE SPINE RUNTIMES, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  *****************************************************************************/
 
 #include <spine/AnimationState.h>
@@ -35,6 +35,7 @@
 #define FIRST 1
 #define HOLD 2
 #define HOLD_MIX 3
+#define NOT_LAST 4
 
 _SP_ARRAY_IMPLEMENT_TYPE(spTrackEntryArray, spTrackEntry*)
 
@@ -45,7 +46,7 @@ void spAnimationState_disposeStatics () {
 }
 
 /* Forward declaration of some "private" functions so we can keep
-   the same function order in C as we have method order in Java */
+ the same function order in C as we have method order in Java. */
 void _spAnimationState_disposeTrackEntry (spTrackEntry* entry);
 void _spAnimationState_disposeTrackEntries (spAnimationState* state, spTrackEntry* entry);
 int /*boolean*/ _spAnimationState_updateMixingFrom (spAnimationState* self, spTrackEntry* entry, float delta);
@@ -61,8 +62,8 @@ float* _spAnimationState_resizeTimelinesRotation(spTrackEntry* entry, int newSiz
 int* _spAnimationState_resizeTimelinesFirst(spTrackEntry* entry, int newSize);
 void _spAnimationState_ensureCapacityPropertyIDs(spAnimationState* self, int capacity);
 int _spAnimationState_addPropertyID(spAnimationState* self, int id);
-void _spTrackEntry_setTimelineData(spTrackEntry* self, spAnimationState* state);
-
+void _spTrackEntry_computeHold(spTrackEntry* self, spAnimationState* state);
+void _spTrackEntry_computeNotLast(spTrackEntry* self, spAnimationState* state);
 
 _spEventQueue* _spEventQueue_create (_spAnimationState* state) {
 	_spEventQueue *self = CALLOC(_spEventQueue, 1);
@@ -76,7 +77,7 @@ _spEventQueue* _spEventQueue_create (_spAnimationState* state) {
 
 void _spEventQueue_free (_spEventQueue* self) {
 	FREE(self->objects);
-    FREE(self);
+	FREE(self);
 }
 
 void _spEventQueue_ensureCapacity (_spEventQueue* self, int newElements) {
@@ -248,7 +249,7 @@ void spAnimationState_dispose (spAnimationState* self) {
 	_spEventQueue_free(internal->queue);
 	FREE(internal->events);
 	FREE(internal->propertyIDs);
-    FREE(internal);
+	FREE(internal);
 }
 
 void spAnimationState_update (spAnimationState* self, float delta) {
@@ -279,7 +280,7 @@ void spAnimationState_update (spAnimationState* self, float delta) {
 			float nextTime = current->trackLast - next->delay;
 			if (nextTime >= 0) {
 				next->delay = 0;
-				next->trackTime = current->timeScale == 0 ? 0 : (nextTime / current->timeScale + delta) * next->timeScale;
+				next->trackTime += current->timeScale == 0 ? 0 : (nextTime / current->timeScale + delta) * next->timeScale;
 				current->trackTime += currentDelta;
 				_spAnimationState_setCurrent(self, i, next, 1);
 				while (next->mixingFrom) {
@@ -368,9 +369,9 @@ int spAnimationState_apply (spAnimationState* self, spSkeleton* skeleton) {
 		/* Apply mixing from entries first. */
 		mix = current->alpha;
 		if (current->mixingFrom)
-            mix *= _spAnimationState_applyMixingFrom(self, current, skeleton, blend);
-        else if (current->trackTime >= current->trackEnd && current->next == 0)
-            mix = 0;
+			mix *= _spAnimationState_applyMixingFrom(self, current, skeleton, blend);
+		else if (current->trackTime >= current->trackEnd && current->next == 0)
+			mix = 0;
 
 		/* Apply current entry. */
 		animationLast = current->animationLast; animationTime = spTrackEntry_getAnimationTime(current);
@@ -388,7 +389,7 @@ int spAnimationState_apply (spAnimationState* self, spSkeleton* skeleton) {
 
 			for (ii = 0; ii < timelineCount; ii++) {
 				timeline = timelines[ii];
-				timelineBlend = timelineMode->items[ii] == SUBSEQUENT ? blend : SP_MIX_BLEND_SETUP;
+				timelineBlend = (timelineMode->items[ii] & (NOT_LAST - 1)) == SUBSEQUENT ? blend : SP_MIX_BLEND_SETUP;
 				if (timeline->type == SP_TIMELINE_ROTATE)
 					_spAnimationState_applyRotateTimeline(self, timeline, skeleton, animationTime, mix, timelineBlend, timelinesRotation, ii << 1, firstFrame);
 				else
@@ -464,11 +465,14 @@ float _spAnimationState_applyMixingFrom (spAnimationState* self, spTrackEntry* t
 			spMixDirection direction = SP_MIX_DIRECTION_OUT;
 			spTimeline *timeline = timelines[i];
 
-			switch (timelineMode->items[i]) {
+			switch (timelineMode->items[i] & (NOT_LAST - 1)) {
 				case SUBSEQUENT:
-					if (!attachments && timeline->type == SP_TIMELINE_ATTACHMENT) continue;
-					if (!drawOrder && timeline->type == SP_TIMELINE_DRAWORDER) continue;
 					timelineBlend = blend;
+					if (!attachments && timeline->type == SP_TIMELINE_ATTACHMENT) {
+						if ((timelineMode->items[i] & NOT_LAST) == NOT_LAST) continue;
+						timelineBlend = SP_MIX_BLEND_SETUP;
+					}
+					if (!drawOrder && timeline->type == SP_TIMELINE_DRAWORDER) continue;
 					alpha = alphaMix;
 					break;
 				case FIRST:
@@ -488,18 +492,18 @@ float _spAnimationState_applyMixingFrom (spAnimationState* self, spTrackEntry* t
 			from->totalAlpha += alpha;
 			if (timeline->type == SP_TIMELINE_ROTATE)
 				_spAnimationState_applyRotateTimeline(self, timeline, skeleton, animationTime, alpha, timelineBlend,
-													  timelinesRotation, i << 1, firstFrame);
+					timelinesRotation, i << 1, firstFrame);
 			else {
 				if (timelineBlend == SP_MIX_BLEND_SETUP) {
 					if (timeline->type == SP_TIMELINE_ATTACHMENT) {
-						if (attachments) direction = SP_MIX_DIRECTION_IN;
+						if (attachments || (timelineMode->items[i] & NOT_LAST) == NOT_LAST) direction = SP_MIX_DIRECTION_IN;
 					} else if (timeline->type == SP_TIMELINE_DRAWORDER) {
 						if (drawOrder) direction = SP_MIX_DIRECTION_IN;
 					}
 				}
 
 				spTimeline_apply(timeline, skeleton, animationLast, animationTime, events, &internal->eventsCount,
-								 alpha, timelineBlend, direction);
+					alpha, timelineBlend, direction);
 			}
 		}
 	}
@@ -513,7 +517,9 @@ float _spAnimationState_applyMixingFrom (spAnimationState* self, spTrackEntry* t
 	return mix;
 }
 
-void _spAnimationState_applyRotateTimeline (spAnimationState* self, spTimeline* timeline, spSkeleton* skeleton, float time, float alpha, spMixBlend blend, float* timelinesRotation, int i, int /*boolean*/ firstFrame) {
+void _spAnimationState_applyRotateTimeline (spAnimationState* self, spTimeline* timeline, spSkeleton* skeleton, float time,
+	float alpha, spMixBlend blend, float* timelinesRotation, int i, int /*boolean*/ firstFrame
+) {
 	spRotateTimeline *rotateTimeline;
 	float *frames;
 	spBone* bone;
@@ -536,6 +542,7 @@ void _spAnimationState_applyRotateTimeline (spAnimationState* self, spTimeline* 
 	rotateTimeline = SUB_CAST(spRotateTimeline, timeline);
 	frames = rotateTimeline->frames;
 	bone = skeleton->bones[rotateTimeline->boneIndex];
+	if (!bone->active) return;
 	if (time < frames[0]) {
 		switch (blend) {
 			case SP_MIX_BLEND_SETUP:
@@ -556,8 +563,7 @@ void _spAnimationState_applyRotateTimeline (spAnimationState* self, spTimeline* 
 			prevRotation = frames[frame + ROTATE_PREV_ROTATION];
 			frameTime = frames[frame];
 			percent = spCurveTimeline_getCurvePercent(SUPER(rotateTimeline), (frame >> 1) - 1,
-													  1 - (time - frameTime) /
-														  (frames[frame + ROTATE_PREV_TIME] - frameTime));
+				1 - (time - frameTime) / (frames[frame + ROTATE_PREV_TIME] - frameTime));
 
 			r2 = frames[frame + ROTATE_ROTATION] - prevRotation;
 			r2 -= (16384 - (int) (16384.499999999996 - r2 / 360)) * 360;
@@ -692,8 +698,7 @@ void _spAnimationState_setCurrent (spAnimationState* self, int index, spTrackEnt
 }
 
 /** Set the current animation. Any queued animations are cleared. */
-spTrackEntry* spAnimationState_setAnimationByName (spAnimationState* self, int trackIndex, const char* animationName,
-												   int/*bool*/loop) {
+spTrackEntry* spAnimationState_setAnimationByName (spAnimationState* self, int trackIndex, const char* animationName, int/*bool*/loop) {
 	spAnimation* animation = spSkeletonData_findAnimation(self->data->skeletonData, animationName);
 	return spAnimationState_setAnimation(self, trackIndex, animation, loop);
 }
@@ -724,13 +729,13 @@ spTrackEntry* spAnimationState_setAnimation (spAnimationState* self, int trackIn
 /** Adds an animation to be played delay seconds after the current or last queued animation, taking into account any mix
  * duration. */
 spTrackEntry* spAnimationState_addAnimationByName (spAnimationState* self, int trackIndex, const char* animationName,
-												   int/*bool*/loop, float delay) {
+	int/*bool*/loop, float delay
+) {
 	spAnimation* animation = spSkeletonData_findAnimation(self->data->skeletonData, animationName);
 	return spAnimationState_addAnimation(self, trackIndex, animation, loop, delay);
 }
 
-spTrackEntry* spAnimationState_addAnimation (spAnimationState* self, int trackIndex, spAnimation* animation, int/*bool*/loop,
-											 float delay) {
+spTrackEntry* spAnimationState_addAnimation (spAnimationState* self, int trackIndex, spAnimation* animation, int/*bool*/loop, float delay) {
 	spTrackEntry* entry;
 	_spAnimationState* internal = SUB_CAST(_spAnimationState, self);
 	spTrackEntry* last = _spAnimationState_expandToIndex(self, trackIndex);
@@ -865,9 +870,20 @@ void _spAnimationState_animationsChanged (spAnimationState* self) {
 		while (entry->mixingFrom != 0)
 			entry = entry->mixingFrom;
 		do {
-			if (entry->mixingTo == 0 || entry->mixBlend != SP_MIX_BLEND_ADD) _spTrackEntry_setTimelineData(entry, self);
+			if (entry->mixingTo == 0 || entry->mixBlend != SP_MIX_BLEND_ADD) _spTrackEntry_computeHold(entry, self);
 			entry = entry->mixingTo;
 		} while (entry != 0);
+	}
+
+	internal->propertyIDsCount = 0;
+	i = self->tracksCount - 1;
+	for (; i >= 0; i--) {
+		entry = self->tracks[i];
+		if (!entry) continue;
+		while (entry != 0) {
+			_spTrackEntry_computeNotLast(entry, self);
+			entry = entry->mixingFrom;
+		}
 	}
 }
 
@@ -933,7 +949,7 @@ int /*boolean*/ _spTrackEntry_hasTimeline(spTrackEntry* self, int id) {
 	return 0;
 }
 
-void _spTrackEntry_setTimelineData(spTrackEntry* entry, spAnimationState* state) {
+void _spTrackEntry_computeHold(spTrackEntry* entry, spAnimationState* state) {
 	spTrackEntry* to;
 	spTimeline** timelines;
 	int timelinesCount;
@@ -961,12 +977,14 @@ void _spTrackEntry_setTimelineData(spTrackEntry* entry, spAnimationState* state)
 	i = 0;
 	continue_outer:
 	for (; i < timelinesCount; i++) {
-		int id = spTimeline_getPropertyId(timelines[i]);
+		spTimeline* timeline = timelines[i];
+		int id = spTimeline_getPropertyId(timeline);
 		if (!_spAnimationState_addPropertyID(state, id))
 			timelineMode[i] = SUBSEQUENT;
-		else if (to == 0 || !_spTrackEntry_hasTimeline(to, id))
+		else if (to == 0 || timeline->type == SP_TIMELINE_ATTACHMENT || timeline->type == SP_TIMELINE_DRAWORDER ||
+				timeline->type == SP_TIMELINE_EVENT || !_spTrackEntry_hasTimeline(to, id)) {
 			timelineMode[i] = FIRST;
-		else {
+		} else {
 			for (next = to->mixingTo; next != 0; next = next->mixingTo) {
 				if (_spTrackEntry_hasTimeline(next, id)) continue;
 				if (next->mixDuration > 0) {
@@ -978,6 +996,25 @@ void _spTrackEntry_setTimelineData(spTrackEntry* entry, spAnimationState* state)
 				break;
 			}
 			timelineMode[i] = HOLD;
+		}
+	}
+}
+
+void _spTrackEntry_computeNotLast(spTrackEntry* entry, spAnimationState* state) {
+	spTimeline** timelines ;
+	int timelinesCount;
+	int* timelineMode;
+	int i;
+
+	timelines = entry->animation->timelines;
+	timelinesCount = entry->animation->timelinesCount;
+	timelineMode = entry->timelineMode->items;
+
+	i = 0;
+	for (; i < timelinesCount; i++) {
+		if (timelines[i]->type == SP_TIMELINE_ATTACHMENT) {
+			spAttachmentTimeline* timeline = SUB_CAST(spAttachmentTimeline, timelines[i]);
+			if (!_spAnimationState_addPropertyID(state, timeline->slotIndex)) timelineMode[i] |= NOT_LAST;
 		}
 	}
 }
