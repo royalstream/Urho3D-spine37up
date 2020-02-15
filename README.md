@@ -4,6 +4,10 @@ This repo contains the **spine-c** folder taken from here https://github.com/Eso
 
 We also created a new project in Urho3D's Samples folder called **33_Urho2DSpineAnimation** which is **33_Urho2DSpriterAnimation** with some minor changes to use Spine instead of Spriter. The code for this example is the same for all branches.
 
+# Installation
 
+1. Copy on top of your Urho3D installation. It should not overwrite any files.
+2. Rerun build scripts / cmake
+3. Rebuild project
 
 
