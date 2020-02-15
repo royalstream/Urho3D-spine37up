@@ -1,4 +1,4 @@
-# Runtime files and Sample for Urho3D and Spine 3.7 and above.
+# Runtime files and Sample for Urho3D and Spine 3.7+
 
 This repo contains the **spine-c** folder taken from here https://github.com/EsotericSoftware/spine-runtimes with no code changes. The **spineboy** example was also included. Since this repository has different branches for different runtime versions and they're not backwards-compatible, we followed the same approach. At the time of writing there are two branches: 3.7 and 3.8 branch. 
 
